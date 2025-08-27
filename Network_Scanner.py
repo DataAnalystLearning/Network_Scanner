@@ -1057,11 +1057,11 @@ class NetworkScannerGUI:
             self.build_topology()
         
         self.root.after(0, self.scan_complete)
-
-# ==== SUBNET FILTERING METHODS FOR NetworkScannerGUI CLASS ====
+    
+    # ==== IMPROVED SUBNET FILTERING METHODS FOR NetworkScannerGUI CLASS ====
     
     def detect_subnets(self):
-        """Auto-detect subnets from discovered hosts"""
+        """Auto-detect meaningful subnets from discovered hosts, filtering out broadcast addresses"""
         import ipaddress
         from collections import defaultdict
         
@@ -1074,6 +1074,10 @@ class NetworkScannerGUI:
             try:
                 ip = ipaddress.IPv4Address(ip_str)
                 
+                # Skip broadcast addresses and other non-host IPs
+                if self.is_broadcast_or_network_address(ip_str):
+                    continue
+                
                 # Try different subnet masks to group devices
                 for prefix_len in [24, 16, 8]:  # /24, /16, /8
                     try:
@@ -1081,22 +1085,59 @@ class NetworkScannerGUI:
                         subnet_key = f"{network.network_address}/{prefix_len}"
                         
                         # Only add if this creates meaningful groups
-                        if prefix_len == 24 or len([h for h in self.discovered_hosts.keys() 
-                                                  if ipaddress.IPv4Address(h) in network]) > 1:
+                        hosts_in_network = [h for h in self.discovered_hosts.keys() 
+                                          if not self.is_broadcast_or_network_address(h) and
+                                          ipaddress.IPv4Address(h) in network]
+                        
+                        if len(hosts_in_network) > 1:
                             subnet_groups[subnet_key].append(ip_str)
                             break
                     except:
                         continue
                         
             except:
-                # If IP parsing fails, put in "Other" category
-                subnet_groups["Other"].append(ip_str)
+                # If IP parsing fails, put in "Other" category (only if not broadcast)
+                if not self.is_broadcast_or_network_address(ip_str):
+                    subnet_groups["Other"].append(ip_str)
         
         # Remove duplicate entries and sort
         for subnet in subnet_groups:
             subnet_groups[subnet] = sorted(list(set(subnet_groups[subnet])))
         
-        return dict(subnet_groups)
+        # Only return if we have multiple meaningful subnets
+        meaningful_subnets = {k: v for k, v in subnet_groups.items() if len(v) >= 2}
+        
+        # Don't show filter if only one meaningful subnet
+        if len(meaningful_subnets) <= 1:
+            return {}
+            
+        return meaningful_subnets
+    
+    def is_broadcast_or_network_address(self, ip_str):
+        """Check if IP is a broadcast, network, or other non-host address"""
+        try:
+            import ipaddress
+            ip = ipaddress.IPv4Address(ip_str)
+            
+            # Check for broadcast addresses (ending in .255)
+            if str(ip).endswith('.255'):
+                return True
+            
+            # Check for network addresses (ending in .0)
+            if str(ip).endswith('.0'):
+                return True
+                
+            # Check for multicast range (224.0.0.0 to 239.255.255.255)
+            if ip.is_multicast:
+                return True
+                
+            # Check for loopback
+            if ip.is_loopback:
+                return True
+                
+            return False
+        except:
+            return False
     
     def create_subnet_filter_controls(self, parent_frame, canvas, ax, fig):
         """Create subnet filtering controls"""
@@ -1105,8 +1146,11 @@ class NetworkScannerGUI:
         self.subnet_groups = self.detect_subnets()
         
         if len(self.subnet_groups) <= 1:
-            # No meaningful subnets to filter
+            # No meaningful subnets to filter - don't show filter controls
+            print("DEBUG: Not showing subnet filter - only one meaningful subnet detected")
             return
+        
+        print(f"DEBUG: Creating subnet filter with {len(self.subnet_groups)} subnets: {list(self.subnet_groups.keys())}")
         
         # Create filter frame
         filter_frame = tk.Frame(parent_frame)
@@ -1154,226 +1198,430 @@ class NetworkScannerGUI:
             self.filter_info_label.config(text=f"({count} devices)")
     
     def apply_subnet_filter(self, canvas, ax, fig):
-        """Apply the selected subnet filter to the topology view"""
+        """Apply subnet filter using your existing topology visualization style"""
         selected_subnet = self.subnet_var.get()
         
         try:
-            # Clear the current plot
-            ax.clear()
+            print(f"DEBUG: Applying subnet filter: {selected_subnet}")
             
             # Determine which hosts to show
             if selected_subnet == "All Networks":
                 filtered_hosts = self.discovered_hosts
-                title_suffix = ""
+                print(f"DEBUG: Showing all {len(filtered_hosts)} hosts")
             elif selected_subnet in self.subnet_groups:
                 # Filter to only show hosts in selected subnet
                 subnet_ips = self.subnet_groups[selected_subnet]
                 filtered_hosts = {ip: info for ip, info in self.discovered_hosts.items() 
                                 if ip in subnet_ips}
-                title_suffix = f" - {selected_subnet}"
+                print(f"DEBUG: Filtered to {len(filtered_hosts)} hosts in {selected_subnet}")
             else:
                 filtered_hosts = self.discovered_hosts
-                title_suffix = ""
+                print(f"DEBUG: Unknown subnet selection, showing all {len(filtered_hosts)} hosts")
             
-            # Recreate the network graph with filtered hosts
-            self.create_filtered_topology(ax, filtered_hosts, title_suffix)
+            # Clear the current plot
+            ax.clear()
+            
+            # Recreate the topology using your existing method but with filtered hosts
+            self.redraw_topology_with_filter(ax, filtered_hosts, selected_subnet)
             
             # Refresh the display
             canvas.draw()
             
-            print(f"DEBUG: Applied subnet filter: {selected_subnet}")
-            print(f"DEBUG: Showing {len(filtered_hosts)} devices")
+            print(f"DEBUG: Successfully applied subnet filter")
             
         except Exception as e:
             messagebox.showerror("Filter Error", f"Failed to apply subnet filter: {str(e)}")
             print(f"DEBUG: Subnet filter error: {e}")
     
-    def create_filtered_topology(self, ax, filtered_hosts, title_suffix=""):
-        """Create topology visualization with filtered hosts"""
-        import networkx as nx
-        import matplotlib.pyplot as plt
-        from matplotlib.patches import FancyBboxPatch
+    def redraw_topology_with_filter(self, ax, filtered_hosts, subnet_name):
+        """Redraw topology using your existing style but with filtered hosts"""
         
-        if not filtered_hosts:
-            ax.text(0.5, 0.5, 'No devices in selected subnet', 
+        # Create a filtered network graph
+        filtered_graph = self.create_filtered_network_graph(filtered_hosts)
+        
+        if not filtered_graph.nodes():
+            ax.text(0.5, 0.5, f'No devices in {subnet_name}' if subnet_name != "All Networks" else 'No devices found', 
                    ha='center', va='center', transform=ax.transAxes,
                    fontsize=14, color='gray')
-            ax.set_title(f"Network Topology{title_suffix}")
+            ax.set_title(f"Network Topology - {subnet_name}")
             return
         
-        # Create network graph for filtered hosts
-        G = nx.Graph()
+        # Use your existing device mappings and layout logic
+        device_mappings = self.create_legend_mappings()
         
-        # Add nodes
-        for ip in filtered_hosts.keys():
-            G.add_node(ip)
-        
-        # Add edges (you may want to customize this logic based on your network discovery)
-        # For now, we'll connect devices in the same subnet or with similar characteristics
-        self.add_network_edges(G, filtered_hosts)
-        
-        # Create layout
-        if len(G.nodes()) == 1:
-            pos = {list(G.nodes())[0]: (0.5, 0.5)}
-        else:
-            try:
-                pos = nx.spring_layout(G, k=3, iterations=50, seed=42)
-            except:
-                pos = nx.random_layout(G, seed=42)
-        
-        # Draw the network
-        self.draw_filtered_network(ax, G, pos, filtered_hosts)
-        
-        # Set title
-        ax.set_title(f"Network Topology{title_suffix}", fontsize=14, fontweight='bold', pad=20)
-        ax.set_aspect('equal')
-        ax.axis('off')
-    
-    def add_network_edges(self, G, hosts):
-        """Add edges to the graph based on network relationships"""
-        import ipaddress
-        
-        # Group devices by /24 subnets for connection logic
-        subnet_24_groups = {}
-        
-        for ip_str in hosts.keys():
-            try:
-                ip = ipaddress.IPv4Address(ip_str)
-                subnet_24 = ipaddress.IPv4Network(f"{ip}/24", strict=False)
-                subnet_key = str(subnet_24.network_address)
-                
-                if subnet_key not in subnet_24_groups:
-                    subnet_24_groups[subnet_key] = []
-                subnet_24_groups[subnet_key].append(ip_str)
-            except:
-                continue
-        
-        # Connect devices within the same /24 subnet
-        for subnet, ips in subnet_24_groups.items():
-            if len(ips) > 1:
-                # Create a hub-and-spoke or mesh topology within subnet
-                if len(ips) <= 4:
-                    # Mesh for small groups
-                    for i, ip1 in enumerate(ips):
-                        for ip2 in ips[i+1:]:
-                            G.add_edge(ip1, ip2)
-                else:
-                    # Hub-and-spoke for larger groups (use gateway or first device as hub)
-                    hub_ip = self.find_likely_gateway(ips, hosts)
-                    for ip in ips:
-                        if ip != hub_ip:
-                            G.add_edge(hub_ip, ip)
-    
-    def find_likely_gateway(self, ips, hosts):
-        """Find the most likely gateway/router in a subnet"""
-        # Look for devices that might be gateways (routers, switches, etc.)
-        for ip in ips:
-            device_type = hosts[ip].get('device_type', '').lower()
-            hostname = hosts[ip].get('hostname', '').lower()
-            
-            if any(keyword in device_type for keyword in ['router', 'gateway', 'switch']):
-                return ip
-            if any(keyword in hostname for keyword in ['router', 'gateway', 'gw', 'switch']):
-                return ip
-        
-        # Fallback: use the .1 address if available, otherwise first IP
-        import ipaddress
-        try:
-            network = ipaddress.IPv4Network(f"{ips[0]}/24", strict=False)
-            gateway_ip = str(network.network_address + 1)
-            if gateway_ip in ips:
-                return gateway_ip
-        except:
-            pass
-        
-        return ips[0]  # Fallback to first IP
-    
-    def draw_filtered_network(self, ax, G, pos, hosts):
-        """Draw the filtered network topology"""
-        
-        # Define colors for different device types
-        device_colors = {
-            'router': '#FF5722',     # Red-orange
-            'switch': '#2196F3',     # Blue  
-            'server': '#4CAF50',     # Green
-            'computer': '#9C27B0',   # Purple
-            'laptop': '#FF9800',     # Orange
-            'mobile': '#795548',     # Brown
-            'printer': '#607D8B',    # Blue-grey
-            'iot': '#E91E63',        # Pink
-            'unknown': '#757575'     # Grey
+        # Define node shapes (same as your original)
+        shape_map = {
+            'Gateway (.1/.254)': 'D',      # Diamond
+            'Router/Gateway': 'D',          # Diamond  
+            'Router/Switch': 'D',           # Diamond
+            'Router/Network Device': 'D',   # Diamond
+            'Router': 'D',                  # Diamond
+            'Switch': 's',                  # Square
+            'Access Point': '^',            # Triangle
+            'Server/Web Device': 's',       # Square
+            'Windows Host': 'o',            # Circle
+            'Linux Host': 'o',              # Circle
+            'IP Camera/CCTV': 'v',          # Inverted triangle
+            'IP Camera': 'v',               # Inverted triangle
+            'Mobile Device': 'o',           # Circle (smaller)
+            'Network Device': 'h',          # Hexagon
+            'Host (Filtered/Mobile)': 'o',  # Circle
+            'Unknown': 'o'                  # Circle
         }
         
-        # Prepare node colors and sizes
+        # Categorize nodes using your existing logic
+        gateway_nodes = []
+        infrastructure_nodes = []
+        client_nodes = []
+
+        for node in filtered_graph.nodes():
+            last_octet = int(node.split('.')[-1])
+            device_type = filtered_graph.nodes[node].get('device_type', 'Unknown')
+
+            # Use your existing gateway detection logic
+            is_gateway = (last_octet in [1, 254] or 
+                        'Gateway' in device_type or 
+                        ('Router' in device_type and 'Network Device' not in device_type))
+
+            if is_gateway:
+                gateway_nodes.append(node)
+            elif any(keyword in device_type for keyword in ['Switch', 'Access Point', 'Server', 'Camera']):
+                infrastructure_nodes.append(node)
+            else:
+                client_nodes.append(node)
+        
+        # Use your existing hierarchical layout logic
+        pos = self.create_hierarchical_layout(filtered_graph, gateway_nodes, infrastructure_nodes, client_nodes)
+        
+        # Store positions for click detection
+        self.node_positions = pos.copy()
+        
+        # Group nodes by shape and draw them using your existing method
+        nodes_by_shape = {}
+        for node in filtered_graph.nodes():
+            device_type = filtered_graph.nodes[node].get('device_type', 'Unknown')
+            shape = shape_map.get(device_type, 'o')
+    
+            if shape not in nodes_by_shape:
+                nodes_by_shape[shape] = []
+            nodes_by_shape[shape].append(node)
+        
+        # Draw each shape group (using your existing drawing logic)
+        for shape, nodes in nodes_by_shape.items():
+            if not nodes:
+                continue
+            
+            node_colors, node_sizes = self.prepare_node_appearance(nodes, filtered_graph, gateway_nodes)
+            
+            # Create position dict for this shape group
+            shape_pos = {node: pos[node] for node in nodes}
+    
+            # Draw nodes with the specific shape
+            nx.draw_networkx_nodes(filtered_graph.subgraph(nodes), shape_pos,
+                                node_color=node_colors,
+                                node_size=node_sizes,
+                                node_shape=shape,
+                                alpha=0.8,
+                                edgecolors='black',
+                                linewidths=1,
+                                ax=ax)
+        
+        # Draw edges
+        if filtered_graph.edges():
+            nx.draw_networkx_edges(filtered_graph, pos,
+                                alpha=0.4,
+                                edge_color='#666666',
+                                width=1.5,
+                                style='solid',
+                                ax=ax)
+        
+        # Add labels using your existing logic
+        labels = self.create_node_labels(filtered_graph, gateway_nodes)
+        nx.draw_networkx_labels(filtered_graph, pos, labels, 
+                            font_size=8, font_weight='bold', ax=ax)
+        
+        # Set title
+        title_suffix = f" - {subnet_name}" if subnet_name != "All Networks" else ""
+        ax.set_title(f"Network Topology{title_suffix}\n(Click on any device for details)", 
+                fontsize=14, fontweight='bold', pad=20)
+        ax.axis('off')
+        
+        # Add legend (using your existing legend logic)
+        self.add_topology_legend(ax, filtered_graph, device_mappings, shape_map)
+        
+        # Add statistics
+        stats_text = f"Devices: {len(filtered_graph.nodes())} | " \
+                    f"Gateways: {len(gateway_nodes)} | " \
+                    f"Infrastructure: {len(infrastructure_nodes)} | " \
+                    f"Clients: {len(client_nodes)}"
+        
+        ax.text(0.5, -0.05, stats_text, transform=ax.transAxes, 
+            ha='center', va='top', fontsize=10, 
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgray", alpha=0.8))
+    
+    def create_filtered_network_graph(self, filtered_hosts):
+        """Create a network graph from filtered hosts"""
+        import networkx as nx
+        
+        # Create new graph with filtered hosts
+        filtered_graph = nx.Graph()
+        
+        # Add nodes with attributes
+        for ip, host_info in filtered_hosts.items():
+            filtered_graph.add_node(ip, **host_info)
+        
+        # Build topology for filtered hosts using your existing logic
+        # This recreates the edges based on the same logic as your build_topology method
+        subnets = defaultdict(list)
+        infrastructure_devices = []
+    
+        # Group hosts by subnet
+        for ip in filtered_hosts:
+            network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
+            subnet = str(network.network_address)
+            subnets[subnet].append(ip)
+        
+            # Identify infrastructure devices using your existing logic
+            last_octet = int(ip.split('.')[-1])
+            device_type = filtered_hosts[ip]['device_type']
+            open_ports = filtered_hosts[ip]['open_ports']
+        
+            is_infrastructure = (
+                last_octet in [1, 254] or
+                'Router' in device_type or
+                'Switch' in device_type or 
+                'Gateway' in device_type or
+                'Network Device' in device_type or
+                'Access Point' in device_type or
+                161 in open_ports or
+                22 in open_ports or
+                23 in open_ports
+            )
+        
+            if is_infrastructure:
+                infrastructure_devices.append(ip)
+        
+        # Build topology using your existing logic
+        for subnet, hosts in subnets.items():
+            if len(hosts) > 1:
+                subnet_infrastructure = [h for h in hosts if h in infrastructure_devices]
+                subnet_clients = [h for h in hosts if h not in infrastructure_devices]
+            
+                if subnet_infrastructure:
+                    subnet_infrastructure.sort(key=lambda x: int(x.split('.')[-1]))
+                    primary_gateway = subnet_infrastructure[0]
+                
+                    # Connect infrastructure devices in a chain
+                    for i in range(len(subnet_infrastructure) - 1):
+                        filtered_graph.add_edge(subnet_infrastructure[i], subnet_infrastructure[i + 1])
+                
+                    # Connect client devices to infrastructure
+                    for client in subnet_clients:
+                        best_infrastructure = None
+                    
+                        for infra in subnet_infrastructure:
+                            if 'Network Device' in filtered_hosts[infra]['device_type']:
+                                best_infrastructure = infra
+                                break
+                    
+                        if best_infrastructure is None:
+                            best_infrastructure = subnet_infrastructure[-1]
+                    
+                        filtered_graph.add_edge(best_infrastructure, client)
+                else:
+                    # No infrastructure - create star topology
+                    hub = hosts[0]
+                    for i in range(1, len(hosts)):
+                        filtered_graph.add_edge(hub, hosts[i])
+        
+        return filtered_graph
+    
+    def create_hierarchical_layout(self, graph, gateway_nodes, infrastructure_nodes, client_nodes):
+        """Create hierarchical layout using your existing logic"""
+        import networkx as nx
+        
+        pos = {}
+        all_nodes = list(graph.nodes())
+
+        if len(gateway_nodes) > 0:
+            # Position gateways at the top
+            gateway_width = max(len(gateway_nodes) * 2, 4)
+            for i, gateway in enumerate(gateway_nodes):
+                x_pos = (i - (len(gateway_nodes) - 1) / 2) * (gateway_width / max(len(gateway_nodes), 1))
+                pos[gateway] = (x_pos, 3.0)
+
+            # Position infrastructure devices in middle layer
+            if infrastructure_nodes:
+                infra_y_level = 2.0
+                if len(infrastructure_nodes) == 1:
+                    pos[infrastructure_nodes[0]] = (0, infra_y_level)
+                else:
+                    infra_width = len(infrastructure_nodes) * 1.5
+                    for i, device in enumerate(infrastructure_nodes):
+                        x_pos = (i - (len(infrastructure_nodes) - 1) / 2) * (infra_width / len(infrastructure_nodes))
+                        pos[device] = (x_pos, infra_y_level)
+
+            # Position client devices in grid layout at bottom
+            if client_nodes:
+                client_y_level = 0.8
+        
+                total_clients = len(client_nodes)
+                if total_clients <= 4:
+                    cols = total_clients
+                    rows = 1
+                elif total_clients <= 9:
+                    cols = 3
+                    rows = (total_clients + cols - 1) // cols
+                else:
+                    cols = max(4, int(total_clients ** 0.6))
+                    rows = (total_clients + cols - 1) // cols
+        
+                grid_width = cols * 1.8
+                grid_height = rows * 0.6
+        
+                for i, device in enumerate(client_nodes):
+                    row = i // cols
+                    col = i % cols
+            
+                    x_pos = (col - (cols - 1) / 2) * (grid_width / max(cols, 1))
+                    y_pos = client_y_level - (row * grid_height / max(rows, 1))
+            
+                    pos[device] = (x_pos, y_pos)
+        else:
+            # No gateways - use spring layout
+            try:
+                pos = nx.spring_layout(graph, k=3, iterations=50)
+            except:
+                # Fallback to grid layout
+                nodes = list(graph.nodes())
+                cols = max(1, int(len(nodes) ** 0.5))
+                pos = {}
+                for i, node in enumerate(nodes):
+                    row = i // cols
+                    col = i % cols
+                    pos[node] = (col * 2, -row * 1.5)
+
+        # Ensure all nodes have positions
+        for node in all_nodes:
+            if node not in pos:
+                pos[node] = (0, 0)
+
+        return pos
+    
+    def prepare_node_appearance(self, nodes, graph, gateway_nodes):
+        """Prepare node colors and sizes using your existing logic"""
         node_colors = []
         node_sizes = []
         
-        for node in G.nodes():
-            device_info = hosts[node]
-            device_type = device_info.get('device_type', 'unknown').lower()
-            
-            # Color based on device type
-            color = device_colors.get(device_type, device_colors['unknown'])
-            node_colors.append(color)
-            
-            # Size based on number of open ports or importance
-            open_ports = len(device_info.get('open_ports', []))
-            size = max(800, min(2000, 800 + open_ports * 100))
+        # Use your existing device mappings
+        device_mappings = self.create_legend_mappings()
+        
+        # Vendor colors from your existing code
+        vendor_colors = {
+            'apple': '#007AFF',      'samsung': '#1428A0',    'google': '#4285F4',
+            'microsoft': '#0078D4',  'cisco': '#049FD9',      'netgear': '#F7941D',
+            'tp-link': '#4CC35E',    'asus': '#0066CC',       'linksys': '#003366',
+            'ubiquiti': '#0066CC'
+        }
+        
+        for node in nodes:
+            device_type = graph.nodes[node].get('device_type', 'Unknown')
+            mac_vendor = graph.nodes[node].get('mac_vendor', '')
+            open_ports = graph.nodes[node].get('open_ports', [])
+        
+            # Color selection
+            base_color = device_mappings.get(device_type, {}).get('color', '#95A5A6')
+        
+            vendor_color = None
+            if mac_vendor:
+                vendor_lower = mac_vendor.lower()
+                for vendor, color in vendor_colors.items():
+                    if vendor in vendor_lower:
+                        vendor_color = color
+                        break
+        
+            node_colors.append(vendor_color if vendor_color else base_color)
+        
+            # Size selection using your existing logic
+            base_size = 1000
+        
+            if node in gateway_nodes:
+                size = 2000
+            elif device_type in ['Server/Web Device', 'Switch', 'Router/Switch']:
+                size = 1600
+            elif device_type in ['IP Camera/CCTV', 'Access Point']:
+                size = 1200
+            elif device_type == 'Mobile Device':
+                size = 800
+            else:
+                port_count = len(open_ports) if open_ports else 0
+                size = base_size + (port_count * 50)
+                size = min(size, 1400)
+        
             node_sizes.append(size)
         
-        # Draw edges
-        nx.draw_networkx_edges(G, pos, ax=ax, edge_color='#CCCCCC', 
-                              width=2, alpha=0.7)
-        
-        # Draw nodes
-        nx.draw_networkx_nodes(G, pos, ax=ax, node_color=node_colors,
-                              node_size=node_sizes, alpha=0.8)
-        
-        # Add labels
-        labels = {}
-        for node in G.nodes():
-            hostname = hosts[node].get('hostname', 'Unknown')
-            if hostname == 'Unknown' or hostname == node:
-                labels[node] = node  # Use IP if no hostname
-            else:
-                labels[node] = f"{hostname}\n{node}"
-        
-        # Draw labels with better positioning
-        for node, label in labels.items():
-            x, y = pos[node]
-            ax.text(x, y-0.12, label, ha='center', va='top', 
-                   fontsize=8, fontweight='bold',
-                   bbox=dict(boxstyle="round,pad=0.3", facecolor='white', 
-                           edgecolor='gray', alpha=0.8))
+        return node_colors, node_sizes
     
-    def get_subnet_statistics(self):
-        """Get statistics about detected subnets"""
-        stats = {}
+    def create_node_labels(self, graph, gateway_nodes):
+        """Create node labels using your existing logic"""
+        labels = {}
+        for node in graph.nodes():
+            hostname = graph.nodes[node].get('hostname', node)
+            device_type = graph.nodes[node].get('device_type', 'Unknown')
+            mac_vendor = graph.nodes[node].get('mac_vendor', '')
+    
+            # Truncate long hostnames
+            if len(hostname) > 15:
+                hostname = hostname[:12] + "..."
+    
+            # Create label with device type indicator
+            if node in gateway_nodes:
+                labels[node] = f"[GW] {hostname}\n({node})"
+            elif 'Server' in device_type:
+                labels[node] = f"[SRV] {hostname}\n({node})" 
+            elif 'Camera' in device_type:
+                labels[node] = f"[CAM] {hostname}\n({node})"
+            elif 'Mobile' in device_type:
+                labels[node] = f"[MOB] {hostname}\n({node})"
+            elif mac_vendor and mac_vendor != 'Unknown':
+                labels[node] = f"{hostname}\n({mac_vendor})"
+            else:
+                labels[node] = f"{hostname}\n({node})"
         
-        for subnet, ips in self.subnet_groups.items():
-            device_types = {}
-            active_count = 0
-            
-            for ip in ips:
-                if ip in self.discovered_hosts:
-                    info = self.discovered_hosts[ip]
+        return labels
+    
+    def add_topology_legend(self, ax, graph, device_mappings, shape_map):
+        """Add legend using your existing logic"""
+        existing_types = set()
+        for node in graph.nodes():
+            device_type = graph.nodes[node].get('device_type', 'Unknown')
+            existing_types.add(device_type)
+
+        legend_elements = []
+        from matplotlib.lines import Line2D
+
+        sorted_types = sorted(existing_types, 
+                            key=lambda x: device_mappings.get(x, {}).get('priority', 99))
+
+        for device_type in sorted_types:
+            color = device_mappings.get(device_type, {}).get('color', '#95A5A6')
+            shape = shape_map.get(device_type, 'o')
+    
+            marker_map = {'D': 'D', 's': 's', '^': '^', 'v': 'v', 'h': 'h', 'o': 'o'}
+            marker = marker_map.get(shape, 'o')
+    
+            legend_elements.append(Line2D([0], [0], marker=marker, color='w',
+                                        markerfacecolor=color, 
+                                        markeredgecolor='black',
+                                        markeredgewidth=1,
+                                        markersize=10,
+                                        label=device_type))
+
+        if legend_elements:
+            ax.legend(handles=legend_elements, loc='upper left', frameon=True,
+                    fancybox=True, shadow=True, fontsize=9)
                     
-                    # Count device types
-                    device_type = info.get('device_type', 'Unknown')
-                    device_types[device_type] = device_types.get(device_type, 0) + 1
-                    
-                    # Count active devices
-                    if info.get('status', '').lower() in ['up', 'online', 'active']:
-                        active_count += 1
-            
-            stats[subnet] = {
-                'total_devices': len(ips),
-                'active_devices': active_count,
-                'device_types': device_types
-            }
-        
-        return stats
-        
+    # End of Subnet Filtering on Map   
         
     def build_topology(self):
         """Build network topology based on discovered information"""
