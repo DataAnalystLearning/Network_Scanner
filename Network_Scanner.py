@@ -2886,6 +2886,46 @@ class NetworkScannerGUI:
             "Host (Filtered/Mobile)": {"color": "#95A5A6", "icon": "❓", "priority": 11},
             "Unknown": {"color": "#BDC3C7", "icon": "❓", "priority": 12}
         }
+        
+    def show_connection_details(self):
+        """Show details of network connections"""
+        if not hasattr(self, 'discovered_hosts') or not self.discovered_hosts:
+            messagebox.showwarning("Warning", "No topology data available. Please scan network first.")
+            return
+        
+        details_window = tk.Toplevel(self.root)
+        details_window.title("Network Connection Details")
+        details_window.geometry("700x500")
+        
+        # Create text widget with scrollbar
+        text_frame = ttk.Frame(details_window)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        text_widget = scrolledtext.ScrolledText(text_frame, wrap=tk.WORD)
+        text_widget.pack(fill=tk.BOTH, expand=True)
+        
+        # Display connection information
+        connections_info = "Network Connection Details\n" + "="*50 + "\n\n"
+        
+        if hasattr(self, 'network_graph') and self.network_graph.edges():
+            connections_info += f"Network Edges: {len(self.network_graph.edges())}\n\n"
+            for edge in self.network_graph.edges():
+                device1, device2 = edge
+                info1 = self.discovered_hosts.get(device1, {})
+                info2 = self.discovered_hosts.get(device2, {})
+                
+                connections_info += f"{device1} ({info1.get('device_type', 'Unknown')})\n"
+                connections_info += f"  ↔ Connected to\n"
+                connections_info += f"{device2} ({info2.get('device_type', 'Unknown')})\n\n"
+        else:
+            connections_info += "No network connections detected.\n"
+            connections_info += "This may indicate:\n"
+            connections_info += "- Devices are on different subnets\n"
+            connections_info += "- Network topology couldn't be determined\n"
+            connections_info += "- Devices don't respond to network discovery\n"
+        
+        text_widget.insert(tk.END, connections_info)
+        text_widget.config(state=tk.DISABLED)    
     
     # ==== CORRECTED EXPORT METHODS FOR NetworkScannerGUI CLASS ====
     
@@ -4301,6 +4341,24 @@ class NetworkScannerGUI:
     
             # Tab 3: Service Matrix
             self.create_service_matrix_tab(notebook)
+            
+        def refresh_topology_display(self):
+            """Refresh the topology display"""
+            try:
+                # Check if we have the current topology window
+                if hasattr(self, 'current_topology_window'):
+                    # Close existing topology window
+                    try:
+                        self.current_topology_window.destroy()
+                    except:
+                        pass
+            
+            # Re-open topology window
+            self.show_topology()
+            
+        except Exception as e:
+            print(f"DEBUG: Error in refresh_topology_display: {e}")
+            messagebox.showerror("Refresh Error", f"Failed to refresh topology: {str(e)}")
 
         def create_connection_list_tab(self, notebook):
             """Create the connection list tab"""
@@ -4567,5 +4625,3 @@ def main():
 if __name__ == "__main__":
     main()
     
-
-
